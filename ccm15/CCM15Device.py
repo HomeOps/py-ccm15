@@ -40,14 +40,17 @@ class CCM15Device:
         # None, no pwd parameter is sent.
         self.password = password
         # The CCM15 is a flaky embedded bridge: status.xml periodically times
-        # out or returns a degraded body (empty, or every slot "-") for up to a
-        # minute at a time, even while every AC is online. Cache the last read
-        # that actually decoded devices and serve it for up to `state_ttl`
-        # seconds so a transient dropout does not flap every entity to
-        # unavailable. Set state_ttl to 0 to disable caching.
+        # out, returns a degraded body (empty, or every slot "-"), or reports a
+        # single slot as "-" for one poll while the others decode fine -- even
+        # while every AC is online. Remember the last good read *per slot* and,
+        # when a slot is momentarily missing, serve its cached value for up to
+        # `state_ttl` seconds so a transient dropout does not flap that entity
+        # to unavailable. Tracking per slot (rather than per whole response)
+        # means a single slot dropping out is covered too, not just a total
+        # dropout. Set state_ttl to 0 to disable caching.
         self.state_ttl = state_ttl
-        self._last_state: CCM15DeviceState | None = None
-        self._last_good_monotonic: float | None = None
+        self._slot_cache: dict[int, CCM15SlaveDevice] = {}
+        self._slot_seen: dict[int, float] = {}
         # An httpx.AsyncClient can be passed in to avoid the library
         # constructing one inside an asyncio loop. Constructing an
         # AsyncClient synchronously loads the certifi CA bundle, which
@@ -114,49 +117,77 @@ class CCM15Device:
             ac_data.devices[ac_index] = CCM15SlaveDevice(bytesarr)
         return ac_data
 
-    def _fresh_cached_state(self) -> CCM15DeviceState | None:
-        """Return the last good state if it is still within the TTL, else None.
+    def _remember_slots(self, state: CCM15DeviceState, now: float) -> None:
+        """Record every decoded slot as the latest good read for that slot.
 
-        Stamps every cached device's `age` with how many seconds old the data
-        is, so a consumer can tell a cached read from a live one per device.
+        A live decode resets the slot's age to 0 and refreshes its TTL clock,
+        so a slot that keeps reporting can never be aged out, while one that
+        stops reporting eventually expires from the cache.
         """
-        if (
-            self.state_ttl
-            and self._last_state is not None
-            and self._last_good_monotonic is not None
-        ):
-            age = time.monotonic() - self._last_good_monotonic
+        for index, device in state.devices.items():
+            self._slot_cache[index] = device
+            self._slot_seen[index] = now
+
+    def _backfill_missing_slots(self, state: CCM15DeviceState, now: float) -> None:
+        """Add back slots seen recently but absent from this read.
+
+        A CCM15 intermittently reports an individual slot as "-" for a single
+        poll while the others decode fine. Serving that read as-is would flap
+        just that entity to unavailable, so re-insert each cached slot that is
+        still within `state_ttl`, stamped with its age. A slot missing longer
+        than the TTL is left out so a genuinely removed unit does go away.
+        """
+        if not self.state_ttl:
+            return
+        for index, device in self._slot_cache.items():
+            if index in state.devices:
+                continue
+            age = now - self._slot_seen[index]
             if age < self.state_ttl:
-                for device in self._last_state.devices.values():
-                    device.age = age
-                return self._last_state
-        return None
+                device.age = age
+                state.devices[index] = device
+
+    def _cached_state(self, now: float) -> CCM15DeviceState | None:
+        """Build a state from every cached slot still within the TTL, or None.
+
+        Used when a poll raises or decodes nothing at all: fall back to the
+        union of the per-slot cache so a total dropout still serves the last
+        good values. Returns None once nothing fresh remains, letting the real
+        failure surface.
+        """
+        if not self.state_ttl:
+            return None
+        devices: dict[int, CCM15SlaveDevice] = {}
+        for index, device in self._slot_cache.items():
+            age = now - self._slot_seen[index]
+            if age < self.state_ttl:
+                device.age = age
+                devices[index] = device
+        if not devices:
+            return None
+        return CCM15DeviceState(devices=devices)
 
     async def get_status_async(self) -> CCM15DeviceState:
         """Return the current device state, tolerating transient dropouts.
 
-        A poll that raises (timeout/connection error) or decodes to zero
-        devices is treated as a transient dropout: the last state that did
-        decode devices is returned instead, as long as it is younger than
-        `state_ttl`. Once the cache ages past the TTL the real failure surfaces
-        (the exception propagates, or an empty state is returned) so a device
-        that is genuinely offline does eventually go unavailable.
+        Dropouts are tolerated at the *slot* level: a slot that is momentarily
+        missing (a single "-", or a poll that raises / decodes nothing) is
+        served from its last good read for up to `state_ttl` seconds. Once a
+        slot's cache ages past the TTL it is dropped and the real failure
+        surfaces, so a device that is genuinely offline does go unavailable.
         """
+        now = time.monotonic()
         try:
             state = await self._fetch_data()
         except Exception:
-            cached = self._fresh_cached_state()
+            cached = self._cached_state(now)
             if cached is not None:
                 return cached
             raise
 
-        if state.devices:
-            self._last_state = state
-            self._last_good_monotonic = time.monotonic()
-            return state
-
-        cached = self._fresh_cached_state()
-        return cached if cached is not None else state
+        self._remember_slots(state, now)
+        self._backfill_missing_slots(state, now)
+        return state
 
     async def async_test_connection(self) -> bool:
         """Test the connection to the CCM15 device."""
