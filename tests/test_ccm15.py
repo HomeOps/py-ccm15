@@ -194,6 +194,31 @@ class TestCCM15(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(set(third.devices.keys()), {2, 4})
 
     @patch("httpx.AsyncClient.get")
+    async def test_mass_partial_dropout_keeps_all_slots(self, mock_get) -> None:
+        """Real repro: 5 of 6 slots blink to '-' at once; all 6 stay available."""
+        full = MagicMock()
+        full.text = "<response>" + "".join(
+            f"<a{i}>0000000{i}020304,</a{i}>" for i in range(6)
+        ) + "</response>"
+        # Only a0 still decodes; a1-a5 drop to '-' in the same poll.
+        degraded = MagicMock()
+        degraded.text = (
+            "<response><a0>00000000020304,</a0>"
+            + "".join(f"<a{i}>-</a{i}>" for i in range(1, 6))
+            + "</response>"
+        )
+        mock_get.side_effect = [full, degraded]
+
+        first = await self.ccm.get_status_async()
+        self.assertEqual(set(first.devices.keys()), {0, 1, 2, 3, 4, 5})
+
+        second = await self.ccm.get_status_async()
+        # Without the per-slot cache this would be just {0}; now all 6 survive.
+        self.assertEqual(set(second.devices.keys()), {0, 1, 2, 3, 4, 5})
+        self.assertEqual(second.devices[0].age, 0.0)  # the one live slot
+        self.assertGreaterEqual(second.devices[5].age, 0.0)  # back-filled
+
+    @patch("httpx.AsyncClient.get")
     async def test_async_set_state_low_slot(self, mock_get):
         """Slots 0-31 go into ac0, ac1 is 0."""
         mock_response = MagicMock()
