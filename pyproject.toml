@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "py_ccm15"
-version = "1.1.0"
+version = "1.1.1"
 description = "A package to control Midea CCM15 data converter modules"
 readme = "README.md"
 license = "MIT"
