@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.1](https://github.com/HomeOps/py-ccm15/compare/v1.1.0...v1.1.1) (2026-07-02)
+
+
+### Bug Fixes
+
+* back-fill partial status dropouts from a per-slot cache ([#63](https://github.com/HomeOps/py-ccm15/issues/63)) ([bad15e4](https://github.com/HomeOps/py-ccm15/commit/bad15e480795feab4299ba40efcd978f0428322f))
+
 ## [1.1.0](https://github.com/HomeOps/py-ccm15/compare/v1.0.0...v1.1.0) (2026-06-30)
 
 
