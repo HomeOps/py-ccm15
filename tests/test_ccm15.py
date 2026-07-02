@@ -83,9 +83,10 @@ class TestCCM15(unittest.IsolatedAsyncioTestCase):
         # Age the last good read deterministically: back-to-back calls can land
         # inside a single time.monotonic() tick (coarse on some platforms), so
         # don't rely on wall-clock elapsing to prove the cached read is stamped.
-        self.ccm._last_good_monotonic -= 5
+        self.ccm._slot_seen[0] -= 5
         second = await self.ccm.get_status_async()
-        self.assertIs(second, first)  # served from cache, identical object
+        self.assertEqual(set(second.devices.keys()), {0})
+        self.assertIs(second.devices[0], first.devices[0])  # same cached device
         self.assertGreaterEqual(second.devices[0].age, 5.0)  # stamped as stale
 
     @patch("httpx.AsyncClient.get")
@@ -97,7 +98,8 @@ class TestCCM15(unittest.IsolatedAsyncioTestCase):
 
         first = await self.ccm.get_status_async()
         second = await self.ccm.get_status_async()
-        self.assertIs(second, first)
+        self.assertEqual(set(second.devices.keys()), {0})
+        self.assertIs(second.devices[0], first.devices[0])
 
     @patch("httpx.AsyncClient.get")
     async def test_cache_expires_after_ttl(self, mock_get) -> None:
@@ -109,7 +111,7 @@ class TestCCM15(unittest.IsolatedAsyncioTestCase):
 
         await ccm.get_status_async()
         # Backdate the last good read past the TTL window.
-        ccm._last_good_monotonic -= 301
+        ccm._slot_seen[0] -= 301
         with self.assertRaises(httpx.ConnectTimeout):
             await ccm.get_status_async()
 
@@ -121,11 +123,75 @@ class TestCCM15(unittest.IsolatedAsyncioTestCase):
         good.text = "<response><a0>00000001020304,</a0></response>"
         empty = MagicMock()
         empty.text = "<response><a0>-</a0></response>"
-        mock_get.side_effect = [good, empty]
+        mock_get.side_effect = [good, empty, httpx.ConnectTimeout("boom")]
 
         await ccm.get_status_async()
         second = await ccm.get_status_async()
         self.assertEqual(second.devices, {})
+        # With caching off, a fetch error is never masked either.
+        with self.assertRaises(httpx.ConnectTimeout):
+            await ccm.get_status_async()
+
+    @patch("httpx.AsyncClient.get")
+    async def test_single_slot_dropout_backfills_from_cache(self, mock_get) -> None:
+        """One slot reported '-' for a poll is served from cache, not dropped."""
+        both = MagicMock()
+        both.text = (
+            "<response><a2>00000001020304,</a2>"
+            "<a4>00000005060708,</a4></response>"
+        )
+        # a4 momentarily drops out while a2 keeps decoding live.
+        partial = MagicMock()
+        partial.text = "<response><a2>00000001020304,</a2><a4>-</a4></response>"
+        mock_get.side_effect = [both, partial]
+
+        first = await self.ccm.get_status_async()
+        self.assertEqual(set(first.devices.keys()), {2, 4})
+        self.ccm._slot_seen[4] -= 5  # age slot 4's cache deterministically
+
+        second = await self.ccm.get_status_async()
+        self.assertEqual(set(second.devices.keys()), {2, 4})  # 4 backfilled
+        self.assertEqual(second.devices[2].age, 0.0)  # live
+        self.assertIs(second.devices[4], first.devices[4])  # cached object
+        self.assertGreaterEqual(second.devices[4].age, 5.0)  # stamped stale
+
+    @patch("httpx.AsyncClient.get")
+    async def test_single_slot_dropout_expires_after_ttl(self, mock_get) -> None:
+        """A slot missing longer than the TTL is dropped, not kept forever."""
+        both = MagicMock()
+        both.text = (
+            "<response><a2>00000001020304,</a2>"
+            "<a4>00000005060708,</a4></response>"
+        )
+        partial = MagicMock()
+        partial.text = "<response><a2>00000001020304,</a2><a4>-</a4></response>"
+        mock_get.side_effect = [both, partial]
+
+        await self.ccm.get_status_async()
+        self.ccm._slot_seen[4] -= 301  # past the default 300 s TTL
+
+        second = await self.ccm.get_status_async()
+        self.assertEqual(set(second.devices.keys()), {2})  # 4 aged out
+
+    @patch("httpx.AsyncClient.get")
+    async def test_returning_slot_refreshes_ttl(self, mock_get) -> None:
+        """A slot returning live resets its clock so it can't expire mid-backfill."""
+        both = MagicMock()
+        both.text = (
+            "<response><a2>00000001020304,</a2>"
+            "<a4>00000005060708,</a4></response>"
+        )
+        partial = MagicMock()
+        partial.text = "<response><a2>00000001020304,</a2><a4>-</a4></response>"
+        mock_get.side_effect = [both, both, partial]
+
+        await self.ccm.get_status_async()
+        self.ccm._slot_seen[4] -= 299  # nearly stale...
+        await self.ccm.get_status_async()  # ...but slot 4 decodes live again
+        self.ccm._slot_seen[4] -= 5  # only 5 s old now, well inside the TTL
+
+        third = await self.ccm.get_status_async()
+        self.assertEqual(set(third.devices.keys()), {2, 4})
 
     @patch("httpx.AsyncClient.get")
     async def test_async_set_state_low_slot(self, mock_get):
