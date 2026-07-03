@@ -9,7 +9,22 @@ class CCM15SlaveDevice:
     """Data retrieved from a CCM15 slave device."""
 
     def __init__(self, bytesarr: bytes) -> None:
-        """Initialize the slave device."""
+        """Initialize the slave device by decoding a raw status payload."""
+        self.update(bytesarr)
+
+    def update(self, bytesarr: bytes) -> None:
+        """(Re)decode this device's fields from a raw status payload, in place.
+
+        Called once at construction and again on every poll that delivers fresh
+        bytes for this slot, so a slot keeps a single stable
+        ``CCM15SlaveDevice`` instance for its lifetime instead of being
+        recreated each poll (see ``CCM15Device._decode_slot``). The field
+        values produced here are exactly those a freshly constructed device
+        would have for the same bytes -- ``age`` reset to 0.0 and the opt-in
+        ``desired_swing``/``desired_heater`` reset to ``UNSET`` included -- so
+        reusing an instance is behaviorally identical to replacing it, only
+        without the churn and with a stable object identity.
+        """
         # Seconds since this device's data was actually read from the
         # controller. 0.0 for a live read; > 0 when served from the last-good
         # cache during a transient dropout (set by

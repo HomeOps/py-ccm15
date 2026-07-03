@@ -219,6 +219,31 @@ class TestCCM15(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(second.devices[5].age, 0.0)  # back-filled
 
     @patch("httpx.AsyncClient.get")
+    async def test_live_reread_updates_same_instance(self, mock_get) -> None:
+        """A slot decoding live again updates its existing object, not a new one.
+
+        Only the first sighting of a slot constructs a CCM15SlaveDevice; every
+        later live poll updates that same instance in place, so a consumer that
+        holds a reference to a device keeps seeing fresh data through it.
+        """
+        first_resp = MagicMock()
+        first_resp.text = "<response><a0>00000041d2001a,</a0></response>"  # swing on, 26
+        second_resp = MagicMock()
+        second_resp.text = "<response><a0>00000041d00018,</a0></response>"  # swing off, 24
+        mock_get.side_effect = [first_resp, second_resp]
+
+        first = await self.ccm.get_status_async()
+        obj = first.devices[0]
+        self.assertTrue(obj.is_swing_on)
+        self.assertEqual(26, obj.temperature)
+
+        second = await self.ccm.get_status_async()
+        self.assertIs(second.devices[0], obj)  # same instance, updated in place
+        self.assertFalse(second.devices[0].is_swing_on)  # re-decoded from new bytes
+        self.assertEqual(24, second.devices[0].temperature)
+        self.assertEqual(0.0, second.devices[0].age)  # live read
+
+    @patch("httpx.AsyncClient.get")
     async def test_async_set_state_low_slot(self, mock_get):
         """Slots 0-31 go into ac0, ac1 is 0."""
         mock_response = MagicMock()
