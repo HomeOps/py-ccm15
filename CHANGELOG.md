@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.2](https://github.com/HomeOps/py-ccm15/compare/v1.1.1...v1.1.2) (2026-07-04)
+
+
+### Performance Improvements
+
+* reuse slave device instances across polls ([#65](https://github.com/HomeOps/py-ccm15/issues/65)) ([20ad49d](https://github.com/HomeOps/py-ccm15/commit/20ad49d00b83367b5ce50e946a213baf1fb1128c))
+
 ## [1.1.1](https://github.com/HomeOps/py-ccm15/compare/v1.1.0...v1.1.1) (2026-07-02)
 
 
