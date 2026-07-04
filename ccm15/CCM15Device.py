@@ -114,8 +114,25 @@ class CCM15Device:
                 bytesarr = bytes.fromhex(str(ac_binary).strip(","))
             except ValueError:
                 continue
-            ac_data.devices[ac_index] = CCM15SlaveDevice(bytesarr)
+            ac_data.devices[ac_index] = self._decode_slot(ac_index, bytesarr)
         return ac_data
+
+    def _decode_slot(self, ac_index: int, bytesarr: bytes) -> CCM15SlaveDevice:
+        """Return the CCM15SlaveDevice for a slot: create once, update in place.
+
+        The first time a slot is seen its instance is constructed; on every
+        later poll the *same* instance is updated in place from the new bytes
+        (see CCM15SlaveDevice.update), so a slot keeps a stable object identity
+        for its lifetime instead of a fresh object being allocated each poll.
+        The per-slot cache (self._slot_cache) holds these instances, so a live
+        update and a backfill of a momentarily-missing slot act on one object.
+        _remember_slots remains the sole writer of the cache and _slot_seen.
+        """
+        device = self._slot_cache.get(ac_index)
+        if device is None:
+            return CCM15SlaveDevice(bytesarr)
+        device.update(bytesarr)
+        return device
 
     def _remember_slots(self, state: CCM15DeviceState, now: float) -> None:
         """Record every decoded slot as the latest good read for that slot.
